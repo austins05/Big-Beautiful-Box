@@ -170,6 +170,14 @@ uint8_t do_smi_pdout (
 
    arg_block_pdout_t arg_block_pdout;
 
+   if (len > sizeof (arg_block_pdout.data))
+   {
+      /* BBB hardening 2026-09-05: never overflow the PDOut block (stack). */
+      LOG_WARNING (LOG_STATE_ON, "%s: PDOut len %u > %u refused\n", __func__, len, (unsigned)sizeof (arg_block_pdout.data));
+      os_mutex_unlock (app_port->pdout_mtx);
+      return 1;
+   }
+
    arg_block_pdout.h.arg_block.id = IOLINK_ARG_BLOCK_ID_PD_OUT;
    memcpy (arg_block_pdout.data, data, len);
    arg_block_pdout.h.len = len;

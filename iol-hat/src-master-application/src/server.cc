@@ -111,7 +111,7 @@ void *runServer (void *_arg)
 		// block read() forever and wedge every later dashboard request. Bound it.
 		{
 			struct timeval rcv_tmo;
-			rcv_tmo.tv_sec  = 2;
+			rcv_tmo.tv_sec  = 1;
 			rcv_tmo.tv_usec = 0;
 			setsockopt(newSocket, SOL_SOCKET, SO_RCVTIMEO, &rcv_tmo, sizeof(rcv_tmo));
 			setsockopt(newSocket, SOL_SOCKET, SO_SNDTIMEO, &rcv_tmo, sizeof(rcv_tmo));
@@ -120,7 +120,7 @@ void *runServer (void *_arg)
 		valread = read(newSocket, buffer, 1024);
 		if (valread <= 0)
 		{
-			LOG_WARNING (IOLINK_PL_LOG, "Client sent nothing within 2 s (or hung up); dropping connection\n");
+			LOG_WARNING (IOLINK_PL_LOG, "Client sent nothing within 1 s (or hung up); dropping connection\n");
 			close(newSocket);
 			continue;
 		}
@@ -162,6 +162,25 @@ void *runServer (void *_arg)
 			iolink_app_port_ctx_t * app_port = &iolink_app_master.app_port[buffer[1]];
 			//LOG_DEBUG(IOLINK_PL_LOG, "app_port=%p\n", app_port);
 			LOG_DEBUG(IOLINK_PL_LOG, "buffer[0]=%d\n", buffer[0]);
+
+			// BBB hardening 2026-09-05 (found by TCP fuzzing): data commands for a
+			// port that was never allocated (mode OFF, e.g. "-m1 3") reached the SMI
+			// layer with portnumber 0 and crashed the whole master. PWR/LED/STATUS
+			// are chip-level and stay allowed; everything that touches the stack is
+			// refused with RET_ERROR_PORT_ID.
+			bool port_is_stack_usable = (app_port->allocated == 1) && (mode_ch[myPort] != iolink_mode_INACTIVE);
+			if (!port_is_stack_usable &&
+			    (buffer[0] == CMD_PD || buffer[0] == CMD_READ || buffer[0] == CMD_WRITE
+#ifdef HISTORY
+			     || buffer[0] == CMD_PD_HISTORY
+#endif
+			    ))
+			{
+				LOG_WARNING(IOLINK_PL_LOG, "ERROR: command %u for inactive/unallocated port %u refused\n", buffer[0], myPort);
+				uint8_t myErrorMessage[] = {RET_ERROR, RET_ERROR_PORT_ID};
+				send(newSocket, myErrorMessage, 2, 0);
+			}
+			else
 			// Switch CMD
 			switch (buffer[0])
 			{
@@ -271,7 +290,25 @@ void *runServer (void *_arg)
 					
 					myCmd->lenOut = buffer [2];
 					myCmd->lenIn = buffer[3];
-					
+
+					// BBB hardening 2026-09-05 (found by TCP fuzzing): lenOut is client-chosen
+					// (<=255) but the stack's PDOut block holds at most
+					// sizeof(arg_block_pdout_t::data) bytes; a larger value overflowed the
+					// stack in do_smi_pdout() on the next cycle and crashed the master.
+					// Also require the request to actually carry lenOut bytes.
+					if (myCmd->lenOut > sizeof(((arg_block_pdout_t *)0)->data) ||
+					    (size_t)valread < 4u + myCmd->lenOut)
+					{
+						LOG_WARNING(IOLINK_PL_LOG, "ERROR: CMD_PD lenOut %u invalid (max %u, got %d bytes)\n",
+						            myCmd->lenOut, (unsigned)sizeof(((arg_block_pdout_t *)0)->data), valread);
+						myCmd->lenOut = 0;
+						myCmd->lenIn = 0;
+						uint8_t myErrorMessage[] = {RET_ERROR, RET_ERROR_LEN};
+						send(newSocket, myErrorMessage, 2, 0);
+						os_mutex_unlock (myMutex);
+						break;
+					}
+
 					// Is IO-Link running
 					if (app_port->app_port_state == IOL_STATE_RUNNING)
 					{
@@ -373,25 +410,34 @@ void *runServer (void *_arg)
 						
 						myCmd->lenOut = buffer [2];
 						myCmd->lenIn = buffer[3];
-						
+						if (myCmd->lenOut > sizeof(((arg_block_pdout_t *)0)->data)) myCmd->lenOut = 0; // BBB hardening
+
 						// Copy to command for PD_OUT
 						memcpy(myCmd->dataOut, &buffer[4], myCmd->lenOut);
 						
 						// Copy queue (includes last PD_IN)
+						// BBB hardening 2026-09-05 (found by TCP fuzzing): the queue holds up
+						// to 255 records and lenIn is client-chosen (<=255), so an unbounded
+						// copy overflowed the 1024-byte reply buffer and crashed the master.
+						// Copy only the NEWEST records that fit; report how many were sent.
 						uint8_t myPos = 0;
-						
+						size_t maxItems = (myCmd->lenIn > 0) ? ((sizeof(buffer) - 5) / myCmd->lenIn) : 0;
+						if (maxItems > 255) maxItems = 255;
+						size_t skip = (myQueue->size() > maxItems) ? (myQueue->size() - maxItems) : 0;
+						size_t idx = 0;
 						for (const auto& item : *myQueue)
 						{
+							if (idx++ < skip) continue;
 							memcpy(&buffer[5+((myPos)*myCmd->lenIn)], item.data_in, myCmd->lenIn);
 							myPos++;
 						}
-						
-						buffer[3] = myCmd->lenIn;						
-						buffer[4] = myQueue->size();
-						
+
+						buffer[3] = myCmd->lenIn;
+						buffer[4] = myPos;
+
 						// Len is 5 + Current PD IN + History PD_IN
-						send(newSocket, buffer, 5+ myQueue->size()*myCmd->lenIn, 0);
-						
+						send(newSocket, buffer, 5 + (size_t)myPos * myCmd->lenIn, 0);
+
 						myQueue->clear();					
 					}
 					
@@ -410,8 +456,8 @@ void *runServer (void *_arg)
 						
 						myCmd->lenOut = buffer [2];
 						myCmd->lenIn = buffer[3];
-						
-						
+						if (myCmd->lenOut > sizeof(((arg_block_pdout_t *)0)->data)) myCmd->lenOut = 0; // BBB hardening
+
 						// IN 
 						if (myCmd->lenIn  > 0)
 						{
@@ -482,7 +528,8 @@ void *runServer (void *_arg)
 					
 					uint16_t index = ((uint16_t) buffer [2] << 8) | buffer [3];
 					uint8_t subindex = buffer[4];
-					uint8_t lenRequested = buffer[5];					
+					uint8_t lenRequested = buffer[5];
+					if (lenRequested > 250) lenRequested = 250; // reply must fit in the 1024-byte buffer (6 + len)
 					
 					uint8_t myActualLen = 0;
 					

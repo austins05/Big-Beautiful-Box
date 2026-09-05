@@ -433,6 +433,13 @@ captured the same day. Changes:
   start script's supervisor relaunches it. Under 3 min of continuous 0.3–4 s stalls the link
   always came back within ~10 s of the stalls ending.
 
+- TCP fuzzing of the master's socket (random/malformed frames, half-open clients, connect
+  storms, split sends) found and fixed three master-killing inputs: data commands addressed to
+  the unallocated OFF port (null port in the stack), `CMD_PD_HISTORY` overflowing the reply
+  buffer (queue of 255 × lenIn bytes into 1 KB), and `CMD_PD` with `lenOut` > 32 overflowing
+  the PDOut block on the next cycle. The dashboard never sends any of these; they are
+  robustness fixes. 3 seeds × 5 phases now pass with zero COMLOSTs and the same PID.
+
 Still open: the meter's L+ is hardwired to the shared 24 V rail on the trailers, so
 `iol_power_cycle()` cannot actually power-cycle the meter (it only flips the MAX14819 L+ switch).
 
