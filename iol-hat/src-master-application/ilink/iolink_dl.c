@@ -3660,8 +3660,22 @@ static void dl_main (void * arg)
 
          if (dl->triggered_events & IOLINK_DL_EVENT_MH)
          {
-            // Event to message handler
-            iolink_dl_message_h_sm (port);
+            if (dl->force_comlost)
+            {
+               dl->force_comlost = false;
+               LOG_WARNING (
+                  IOLINK_DL_LOG,
+                  "%s: forced COMLOST requested by application watchdog (MH state: %s). Port %d\n",
+                  __func__,
+                  iolink_dl_mh_st_literals[dl->message_handler.state],
+                  iolink_get_portnumber (port));
+               iolink_dl_mh_handle_com_lost (port);
+            }
+            else
+            {
+               // Event to message handler
+               iolink_dl_message_h_sm (port);
+            }
          }
 
          if (dl->triggered_events & IOLINK_DL_EVENT_TIMEOUT)
@@ -3671,6 +3685,13 @@ static void dl_main (void * arg)
          }
       }
    }
+}
+
+void iolink_dl_request_comlost (iolink_port_t * port)
+{
+   iolink_dl_t * dl = iolink_get_dl_ctx (port);
+   dl->force_comlost = true;
+   os_event_set (dl->event, IOLINK_DL_EVENT_MH);
 }
 
 void iolink_dl_reset (iolink_port_t * port)
@@ -3703,6 +3724,7 @@ void iolink_dl_reset (iolink_port_t * port)
    dl->devdly                  = 0;
    dl->cqerr                   = 0;
    dl->wd_armed_ns             = 0;
+   dl->force_comlost           = false;
    dl->first_read_min_cycl     = true;
 
    if (dl->timer_tcyc != NULL)

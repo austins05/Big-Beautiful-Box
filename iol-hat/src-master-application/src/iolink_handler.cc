@@ -25,6 +25,7 @@
 #include "iolink_pl.h"
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 // --- MACORS
 
@@ -451,6 +452,7 @@ void iolink_handler (iolink_m_cfg_t m_cfg)
 
             if (((EVENT_PD_0 << i) & event_value) != 0)
             {
+               app_port_forced_restarts[i] = 0; /* healthy again */
                if (app_port->app_port_state == IOL_STATE_RUNNING)
                {
                   if (app_port->run_function != NULL)
@@ -573,28 +575,52 @@ void iolink_handler (iolink_m_cfg_t m_cfg)
                continue;
             }
             app_port_forced_restarts[i]++;
+            uint32_t attempt = app_port_forced_restarts[i];
             LOG_WARNING (
                LOG_STATE_ON,
-               "Port %u: no progress for %llu ms in app state %u - resetting channel and re-establishing (#%u)\n",
+               "Port %u: no progress for %llu ms in app state %u - recovery attempt #%u\n",
                app_port->portnumber,
                (unsigned long long)((now - app_port_progress_ns[i]) / 1000000ull),
                app_port->app_port_state,
-               app_port_forced_restarts[i]);
+               attempt);
             app_port_progress_ns[i] = now;
-            if (iolink_tsd_tmr[i] != NULL)
-            {
-               os_timer_stop (iolink_tsd_tmr[i]);
-            }
             iolink_port_t * port = iolink_get_port (iolink_app_master.master, app_port->portnumber);
-            if (port != NULL)
+            if (attempt == 1 && port != NULL)
             {
-               /* Full MAX14819 channel reset: clears EstCom/wake-up bookkeeping,
-                * FIFOs and error latches, then re-arms SDCI mode. */
-               PL_SetMode_req (port, iolink_mode_INACTIVE);
-               PL_SetMode_req (port, iolink_mode_SDCI);
+               /* Gentle: let the DL run its own COMLOST path. This completes any
+                * pending startup read with an error so the SM/CM unwind to
+                * PortInactive and the normal COMLOST->retry chain restarts. */
+               iolink_dl_request_comlost (port);
             }
-            /* Same path as a COMLOST retry: DL reset + port reconfiguration. */
-            iolink_retry_estcom (NULL, (void *)(uintptr_t)i);
+            else if (attempt <= 3)
+            {
+               /* Firm: MAX14819 channel reset (clears EstCom/wake-up bookkeeping,
+                * FIFOs, error latches, re-arms SDCI) + DL reset + reconfigure. */
+               if (iolink_tsd_tmr[i] != NULL)
+               {
+                  os_timer_stop (iolink_tsd_tmr[i]);
+               }
+               if (port != NULL)
+               {
+                  PL_SetMode_req (port, iolink_mode_INACTIVE);
+                  PL_SetMode_req (port, iolink_mode_SDCI);
+               }
+               iolink_retry_estcom (NULL, (void *)(uintptr_t)i);
+            }
+            else
+            {
+               /* Last resort: the stack has an unrecoverable internal state.
+                * Exit; start_iol_dashboard.sh supervises this process and
+                * relaunches it within a few seconds. The dashboard already
+                * holds the pump-stop fault while the port is down. */
+               LOG_ERROR (
+                  LOG_STATE_ON,
+                  "Port %u: still no progress after %u recovery attempts - exiting for supervisor relaunch\n",
+                  app_port->portnumber,
+                  attempt);
+               fflush (stdout);
+               _exit (3);
+            }
          }
       }
    }

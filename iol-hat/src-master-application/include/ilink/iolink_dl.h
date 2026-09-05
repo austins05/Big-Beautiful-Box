@@ -333,6 +333,7 @@ typedef struct iolink_dl
    uint8_t devdly;
    uint8_t cqerr;
    uint64_t wd_armed_ns; /* CLOCK_MONOTONIC ns of the last OPERATE watchdog arming (0 = none) */
+   bool force_comlost;   /* set by iolink_dl_request_comlost(); consumed in dl_main */
    uint8_t txbuffer[IOLINK_RXTX_BUFFER_SIZE];
    uint8_t rxbuffer[IOLINK_RXTX_BUFFER_SIZE];
    uint8_t tinitcyc;
@@ -392,6 +393,13 @@ void iolink_dl_instantiate (
  * @param port               Port information struct
  */
 void iolink_dl_reset (iolink_port_t * port);
+
+/* BBB 2026-09-05: ask the DL thread to run its own COMLOST path (as if the
+ * message handler had lost the device). Unlike iolink_dl_reset(), this completes
+ * pending DL reads/writes with a COMLOST error so the SM/CM state machines
+ * unwind cleanly (an SM stuck in ReadComParameter only leaves on CNF_COMLOST).
+ * Safe to call from any thread. */
+void iolink_dl_request_comlost (iolink_port_t * port);
 
 bool iolink_dl_get_pd_valid_status (iolink_port_t * port);
 

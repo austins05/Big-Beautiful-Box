@@ -421,7 +421,17 @@ captured the same day. Changes:
   COMLOST) within one cycle; the watchdog only backstops a total interrupt loss.
 - `iolhat.py` `verbose = False` (was 4 print lines per read at 50 Hz).
 - Master TCP server: 2 s receive timeout on accepted sockets (a hung client can no longer wedge
-  every later dashboard request); status thread divide-by-zero fixed.
+  every later dashboard request); an SDCI port that is not RUNNING answers process-data reads
+  with zeros instead of issuing an SMI job per request (removes the 50 Hz `DEV_NOT_IN_OPERATE`
+  log flood and the 10-slot API job pool assert/abort risk); STATUS reports `pdInValid=0`
+  whenever the port is not RUNNING; status thread divide-by-zero fixed.
+- `osal.c`: `os_timer_start` never armed periods ≥ 1 s (`tv_nsec` overflow → `EINVAL`); fixed.
+- Recovery ladder, found necessary by stall-fuzzing (SIGSTOP of the master for 0.02–10 s, 150+
+  stops): (1) DL OPERATE watchdog 1 s → COMLOST → WURQ; (2) app-level port watchdog: no
+  progress for 5 s → forced DL COMLOST (unwinds an SM stuck in `ReadComParameter`), then
+  MAX14819 channel reset + re-establish; (3) after 4 failed attempts the master exits and the
+  start script's supervisor relaunches it. Under 3 min of continuous 0.3–4 s stalls the link
+  always came back within ~10 s of the stalls ending.
 
 Still open: the meter's L+ is hardwired to the shared 24 V rail on the trailers, so
 `iol_power_cycle()` cannot actually power-cycle the meter (it only flips the MAX14819 L+ switch).
