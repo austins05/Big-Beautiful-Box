@@ -83,6 +83,16 @@ close the gap (see the self-heal patterns below) or document exactly why not.
    maintenance session. To provision a box with a key at install time:
    `BBB_MAINTENANCE_SECRET='<key>' ./install.sh`.
 
+7b. **The IOL master binary is built by `start_iol_dashboard.sh`, not by the updater.**
+   The updater's deploy step never touched `~/iol-hat`; until V2.50 every box ran the DEBUG
+   binary `install.sh` built once. The start script now syncs `iol-hat/src-master-application`
+   from the repo into `~/iol-hat`, builds `bin/release` when the source changed, prefers it,
+   and relaunches the master if it exits. A change to the vendored master therefore lands on
+   the update that delivers it (the script runs from the repo). Never point the launch back at
+   `bin/debug` in the field: its per-cycle logging through the log pipe is what caused the
+   2026 flow-meter disconnect/pump-stop reports. Do not shrink the OPERATE watchdog in
+   `iolink_dl.c` below ~1 s.
+
 ## NON-UPDATE PITFALLS (runtime / networking)
 
 8. **Field AP must stay LOCAL-ONLY.** `ipv4.method shared` hands out a default

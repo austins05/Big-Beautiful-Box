@@ -332,6 +332,7 @@ typedef struct iolink_dl
    bool first_read_min_cycl;
    uint8_t devdly;
    uint8_t cqerr;
+   uint64_t wd_armed_ns; /* CLOCK_MONOTONIC ns of the last OPERATE watchdog arming (0 = none) */
    uint8_t txbuffer[IOLINK_RXTX_BUFFER_SIZE];
    uint8_t rxbuffer[IOLINK_RXTX_BUFFER_SIZE];
    uint8_t tinitcyc;

@@ -787,6 +787,8 @@ static void iolink_dl_mh_handle_com_lost (iolink_port_t * port)
    dl->txerror = false;
    
    // Reset message handler state
+   dl->wd_armed_ns = 0;
+   os_timer_stop (dl->timer);
    dl->message_handler.retry = 0;
    
    // Signal mode handler
@@ -1187,6 +1189,53 @@ static void iolink_dl_message_h_sm_get_pd13 (iolink_port_t * port)
    iolink_dl_message_h_sm_get_od14 (port);
 }
 
+
+/* OPERATE-phase software watchdog (BBB-local, reworked 2026-09-05).
+ *
+ * Purpose: if the MAX14819 never raises an interrupt for a sent message (a
+ * genuine wedge) the DL thread would wait forever in AW_REPLY. This timer is a
+ * backstop for THAT case only. Missing/late device replies are detected by the
+ * MAX14819 itself (DelayErr / RxErr -> retry -> COMLOST) within one cycle, so
+ * the value here can be long. 100 ms (the original value) fired on ordinary
+ * Linux scheduling/log-pipe stalls and tore down healthy links: field
+ * disconnects + pump-stop pulses, confirmed on trailersync-sn018 2026-09-05.
+ *
+ * Two protections against false trips:
+ *  - IOL_DL_OPERATE_WATCHDOG_US is ~80 cycles at COM2/12 ms.
+ *  - A timer event that arrives before the current arming has actually aged
+ *    (a stale expiry from a previous arming that raced a re-arm) is ignored.
+ */
+#define IOL_DL_OPERATE_WATCHDOG_US 1000000u
+
+static uint64_t iolink_dl_now_ns (void)
+{
+   struct timespec ts;
+   clock_gettime (CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void iolink_dl_arm_operate_watchdog (iolink_dl_t * dl)
+{
+   os_timer_stop (dl->timer);
+   os_timer_set (dl->timer, IOL_DL_OPERATE_WATCHDOG_US);
+   dl->timer_elapsed = false;
+   dl->timer_type    = IOL_DL_TIMER_TINITCYC_MH;
+   dl->wd_armed_ns   = iolink_dl_now_ns ();
+   os_timer_start (dl->timer);
+}
+
+/* Returns true if a TINITCYC_MH timeout event is a stale expiry that must be
+ * ignored (the watchdog was re-armed less than 90% of its period ago). */
+static bool iolink_dl_operate_watchdog_stale (iolink_dl_t * dl)
+{
+   if (dl->wd_armed_ns == 0)
+   {
+      return false; /* not an OPERATE watchdog arming (e.g. TInitcyc at startup) */
+   }
+   uint64_t age_ns = iolink_dl_now_ns () - dl->wd_armed_ns;
+   return age_ns < ((uint64_t)IOL_DL_OPERATE_WATCHDOG_US * 900ull);
+}
+
 static void iolink_dl_message_h_sm_get_od14 (iolink_port_t * port)
 {
    iolink_dl_t * dl    = iolink_get_dl_ctx (port);
@@ -1206,12 +1255,7 @@ static void iolink_dl_message_h_sm_get_od14 (iolink_port_t * port)
       dl->txbuffer);
    LOG_DEBUG (IOLINK_DL_LOG, "%s: Message sent\n", __func__);
 #endif
-   /* Watchdog: recover if no response within 100ms */
-   os_timer_stop (dl->timer);
-   os_timer_set (dl->timer, 100000);
-   dl->timer_elapsed = false;
-   dl->timer_type = IOL_DL_TIMER_TINITCYC_MH;
-   os_timer_start (dl->timer);
+   iolink_dl_arm_operate_watchdog (dl);
    dl->message_handler.state = IOL_DL_MH_ST_RESPONSE_15; // T29
 }
 
@@ -1308,12 +1352,7 @@ static void iolink_dl_message_h_sm_await_reply16 (iolink_port_t * port)
          dl->txbuffer);
       os_mutex_unlock (dl->mtx);
 #endif
-      /* Watchdog: recover if no response within 100ms */
-      os_timer_stop (dl->timer);
-      os_timer_set (dl->timer, 100000);
-      dl->timer_elapsed = false;
-      dl->timer_type = IOL_DL_TIMER_TINITCYC_MH;
-      os_timer_start (dl->timer);
+      iolink_dl_arm_operate_watchdog (dl);
       dl->message_handler.state = IOL_DL_MH_ST_AW_REPLY_16; // T34
       dl->dataready             = false;
    }
@@ -1350,12 +1389,7 @@ static void iolink_dl_message_h_sm_await_reply16 (iolink_port_t * port)
 #if IOLINK_HW == IOLINK_HW_MAX14819
          PL_Resend (port);
 #endif
-         /* Watchdog: recover if no response within 100ms */
-         os_timer_stop (dl->timer);
-         os_timer_set (dl->timer, 100000);
-         dl->timer_elapsed = false;
-         dl->timer_type = IOL_DL_TIMER_TINITCYC_MH;
-         os_timer_start (dl->timer);
+         iolink_dl_arm_operate_watchdog (dl);
          dl->message_handler.state = IOL_DL_MH_ST_AW_REPLY_16;
       }
    }
@@ -1363,9 +1397,10 @@ static void iolink_dl_message_h_sm_await_reply16 (iolink_port_t * port)
    {
       LOG_ERROR (
          IOLINK_DL_LOG,
-         "%s: %s: Cycle timeout in AW_REPLY - recovering. Port %d\n",
+         "%s: %s: OPERATE watchdog (%u ms, no reply interrupt) in AW_REPLY - recovering. Port %d\n",
          __func__,
          iolink_dl_mh_st_literals[dl->message_handler.state],
+         (unsigned)(IOL_DL_OPERATE_WATCHDOG_US / 1000u),
          iolink_get_portnumber (port));
       iolink_dl_mh_handle_com_lost (port);
    }
@@ -3517,6 +3552,16 @@ static void iolink_dl_handle_timer_timeout (iolink_port_t * port)
    switch (dl->timer_type)
    {
    case IOL_DL_TIMER_TINITCYC_MH:
+      if (iolink_dl_operate_watchdog_stale (dl))
+      {
+         LOG_DEBUG (
+            IOLINK_DL_LOG,
+            "%s: ignoring stale OPERATE watchdog expiry (re-armed %llu ms ago). IOL_DL_MH state: %s\n",
+            __func__,
+            (unsigned long long)((iolink_dl_now_ns () - dl->wd_armed_ns) / 1000000ull),
+            iolink_dl_mh_st_literals[dl->message_handler.state]);
+         break;
+      }
       LOG_DEBUG (
          IOLINK_DL_LOG,
          "%s: TInitcyc timed out. IOL_DL_MH state: %s\n",
@@ -3657,6 +3702,7 @@ void iolink_dl_reset (iolink_port_t * port)
    dl->rxtimeout               = false;
    dl->devdly                  = 0;
    dl->cqerr                   = 0;
+   dl->wd_armed_ns             = 0;
    dl->first_read_min_cycl     = true;
 
    if (dl->timer_tcyc != NULL)

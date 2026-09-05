@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -91,7 +92,7 @@ void *runServer (void *_arg)
 	{
 		LOG_DEBUG (IOLINK_PL_LOG,"Listen on port %d\n", myPort);
 		
-		if (listen(serverFd, 1) < 0) // Allow only 1 connection
+		if (listen(serverFd, 4) < 0) // small backlog: dashboard threads may overlap briefly
 		{
 			LOG_ERROR (IOLINK_PL_LOG, "listen failed\n");
 			exit(EXIT_FAILURE);
@@ -104,8 +105,25 @@ void *runServer (void *_arg)
 		}
 				
 		LOG_DEBUG (IOLINK_PL_LOG, "Accept ok\n");
-		
+
+		// BBB hardening 2026-09-05: this server is single-threaded and serial.
+		// A client that connects and never sends (or dies mid-request) used to
+		// block read() forever and wedge every later dashboard request. Bound it.
+		{
+			struct timeval rcv_tmo;
+			rcv_tmo.tv_sec  = 2;
+			rcv_tmo.tv_usec = 0;
+			setsockopt(newSocket, SOL_SOCKET, SO_RCVTIMEO, &rcv_tmo, sizeof(rcv_tmo));
+			setsockopt(newSocket, SOL_SOCKET, SO_SNDTIMEO, &rcv_tmo, sizeof(rcv_tmo));
+		}
+
 		valread = read(newSocket, buffer, 1024);
+		if (valread <= 0)
+		{
+			LOG_WARNING (IOLINK_PL_LOG, "Client sent nothing within 2 s (or hung up); dropping connection\n");
+			close(newSocket);
+			continue;
+		}
 
 				
 	 char rxBuf[1024*5] = ""; 
@@ -259,6 +277,16 @@ void *runServer (void *_arg)
 					{
 						memcpy(myCmd->dataOut, &buffer[4], myCmd->lenOut);
 						memcpy(&buffer[4], myCmd->dataIn, myCmd->lenIn);
+						buffer[3] = myCmd->lenIn;
+					}
+					else if (mode_ch[myPort] == iolink_mode_SDCI)
+					{
+						// BBB 2026-09-05: an IO-Link (SDCI) port that is not RUNNING has no
+						// valid process data. Answer with zeros directly instead of issuing
+						// an SMI job per request: the dashboard polls at 50 Hz, and each of
+						// those calls used to fail with DEV_NOT_IN_OPERATE (log flood) while
+						// draining the stack's 10-slot API job pool (assert -> abort risk).
+						memset(&buffer[4], 0x00, myCmd->lenIn);
 						buffer[3] = myCmd->lenIn;
 					}
 					else
@@ -589,7 +617,8 @@ void *runServer (void *_arg)
 					// Port not active => Set transmission rate 0 (invalid)
 					if (myPortStatus != IOL_STATE_RUNNING)
 					{
-						status[myPort].transmissionRate = 0;					
+						status[myPort].transmissionRate = 0;
+						status[myPort].pdInValid = 0; // BBB 2026-09-05: never advertise a frozen buffer as valid
 					}
 					
 					else 

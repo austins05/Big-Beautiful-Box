@@ -31,7 +31,7 @@ TCP_PORT2 = 12011
 CMD_SUCCESS = 1
 CMD_FAIL = 0
 
-verbose = True #True
+verbose = False  # per-read prints were 200 lines/s at 50 Hz (see README "Flow Meter Disconnect Recovery"); errors still print
 SOCKET_TIMEOUT_SECONDS = 2.0
 
 def _open_socket():
@@ -88,7 +88,7 @@ def power (port, status):
 
 #CMD PD
 def pd (port, len_out, len_in, pd_out):
-	print ("*** CMD PD, port=",port, ", len_out=", len_out, ", len_in=", len_in)
+	if verbose: print ("*** CMD PD, port=",port, ", len_out=", len_out, ", len_in=", len_in)
 
 	if (port not in [0,1,2,3]):
 		print("PD: port out of range")
@@ -144,7 +144,7 @@ LED_RED = 2
 
 def led (port, status):
 
-	print ("*** CMD LED, port=",port)
+	if verbose: print ("*** CMD LED, port=",port)
 	if (port not in [0,1,2,3]):
 		raise ValueError("Port out of range")
 
@@ -195,7 +195,7 @@ def led (port, status):
 
 
 def read (port, index, subindex, length):
-	print ("*** CMD read, port=",port,", index=",index,", subindex=",subindex,", length=",length)
+	if verbose: print ("*** CMD read, port=",port,", index=",index,", subindex=",subindex,", length=",length)
 	return_data = ""
 
 	if (port not in [0,1,2,3]):
@@ -267,7 +267,7 @@ def read (port, index, subindex, length):
 
 
 def write (port, index, subindex, length, writeData):
-	print ("*** CMD WRITE, port=",port,", index=",index,", subindex=",subindex,", length=",length, ", writeData=", writeData)
+	if verbose: print ("*** CMD WRITE, port=",port,", index=",index,", subindex=",subindex,", length=",length, ", writeData=", writeData)
 
 	if (port not in [0,1,2,3]):
 		raise ValueError("WRITE: Port out of range")
@@ -419,7 +419,7 @@ class IolStatus:
 
 
 def readStatus(port):
-	print ("*** CMD STATUS, port=",port)
+	if verbose: print ("*** CMD STATUS, port=",port)
 	return_data = ""
 
 	if (port not in [0,1,2,3]):
@@ -479,7 +479,7 @@ def readStatus(port):
 
 def readStatus2(port):
 	"""Read port status including error byte (CMD_STATUS2 = 8)"""
-	print ("*** CMD STATUS2, port=",port)
+	if verbose: print ("*** CMD STATUS2, port=",port)
 
 	if (port not in [0,1,2,3]):
 		raise ValueError("STATUS2: Port out of range")

@@ -22,7 +22,9 @@
 #include "iolink_dl.h"
 #include "iolink_handler.h"
 #include "iolink_port.h"
+#include "iolink_pl.h"
 #include <stdlib.h>
+#include <time.h>
 
 // --- MACORS
 
@@ -331,6 +333,23 @@ static void PD_cb (
    app_port->pdin.data_len = data_len;
 }
 
+/* BBB 2026-09-05: application-level port watchdog.
+ * The DL layer has its own OPERATE watchdog, but a port can also wedge in the
+ * establish/startup phase with no event ever arriving (seen under long
+ * scheduling stalls: state WU_RETRY_WAIT_TSD/STARTING forever, no COMLOST, no
+ * WURQ). The handler loop below wakes every second when idle; if a port has
+ * made no progress for IOL_APP_STALL_NS we reset the MAX14819 channel and
+ * re-run the establish sequence. Also covers "RUNNING but no PD for 5 s". */
+#define IOL_APP_STALL_NS (5ull * 1000000000ull)
+static uint64_t app_now_ns (void)
+{
+   struct timespec ts;
+   clock_gettime (CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static uint64_t app_port_progress_ns[IOLINK_NUM_PORTS];
+static uint32_t app_port_forced_restarts[IOLINK_NUM_PORTS];
+
 static void iolink_retry_estcom (os_timer_t * tmr, void * arg)
 {
    uint8_t port_idx = ((uintptr_t)arg) & 0xFF;
@@ -424,6 +443,11 @@ void iolink_handler (iolink_m_cfg_t m_cfg)
          for (int i = 0; i < m_cfg.port_cnt; i++)
          {
             iolink_app_port_ctx_t * app_port = &iolink_app_master.app_port[i];
+
+            if ((((EVENT_PD_0 | EVENT_COMLOST_0 | EVENT_PORTE_0 | EVENT_RETRY_ESTCOM_0) << i) & event_value) != 0)
+            {
+               app_port_progress_ns[i] = app_now_ns ();
+            }
 
             if (((EVENT_PD_0 << i) & event_value) != 0)
             {
@@ -526,6 +550,51 @@ void iolink_handler (iolink_m_cfg_t m_cfg)
                   app_port->app_port_state = IOL_STATE_INACTIVE;
                }
             }
+         }
+      }
+      else
+      {
+         /* Idle for 1 s (no events at all): run the port watchdog. */
+         uint64_t now = app_now_ns ();
+         for (int i = 0; i < m_cfg.port_cnt; i++)
+         {
+            iolink_app_port_ctx_t * app_port = &iolink_app_master.app_port[i];
+            if (!app_port->allocated || port_mode[i] != iolink_mode_SDCI)
+            {
+               continue;
+            }
+            if (app_port_progress_ns[i] == 0)
+            {
+               app_port_progress_ns[i] = now;
+               continue;
+            }
+            if ((now - app_port_progress_ns[i]) < IOL_APP_STALL_NS)
+            {
+               continue;
+            }
+            app_port_forced_restarts[i]++;
+            LOG_WARNING (
+               LOG_STATE_ON,
+               "Port %u: no progress for %llu ms in app state %u - resetting channel and re-establishing (#%u)\n",
+               app_port->portnumber,
+               (unsigned long long)((now - app_port_progress_ns[i]) / 1000000ull),
+               app_port->app_port_state,
+               app_port_forced_restarts[i]);
+            app_port_progress_ns[i] = now;
+            if (iolink_tsd_tmr[i] != NULL)
+            {
+               os_timer_stop (iolink_tsd_tmr[i]);
+            }
+            iolink_port_t * port = iolink_get_port (iolink_app_master.master, app_port->portnumber);
+            if (port != NULL)
+            {
+               /* Full MAX14819 channel reset: clears EstCom/wake-up bookkeeping,
+                * FIFOs and error latches, then re-arms SDCI mode. */
+               PL_SetMode_req (port, iolink_mode_INACTIVE);
+               PL_SetMode_req (port, iolink_mode_SDCI);
+            }
+            /* Same path as a COMLOST retry: DL reset + port reconfiguration. */
+            iolink_retry_estcom (NULL, (void *)(uintptr_t)i);
          }
       }
    }

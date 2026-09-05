@@ -547,12 +547,22 @@ void os_timer_start (os_timer_t * timer)
 {
    struct itimerspec its;
 
-   /* Start timer */
-   its.it_value.tv_sec     = 0;
-   its.it_value.tv_nsec    = 1000 * timer->us;
+   /* Start timer.
+    * BBB fix 2026-09-05: normalise into (sec, nsec). The original code put the
+    * whole period into tv_nsec, so any period >= 1 000 000 us made
+    * timer_settime() fail with EINVAL and the timer silently never armed. */
+   its.it_value.tv_sec     = timer->us / 1000000u;
+   its.it_value.tv_nsec    = (long)(timer->us % 1000000u) * 1000L;
+   if (its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0)
+   {
+      its.it_value.tv_nsec = 1; /* "0" would disarm; fire as soon as possible instead */
+   }
    its.it_interval.tv_sec  = (timer->oneshot) ? 0 : its.it_value.tv_sec;
    its.it_interval.tv_nsec = (timer->oneshot) ? 0 : its.it_value.tv_nsec;
-   timer_settime (timer->timerid, 0, &its, NULL);
+   if (timer_settime (timer->timerid, 0, &its, NULL) != 0)
+   {
+      fprintf (stderr, "os_timer_start: timer_settime failed (us=%u)\n", (unsigned)timer->us);
+   }
 }
 
 void os_timer_stop (os_timer_t * timer)

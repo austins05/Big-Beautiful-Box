@@ -399,7 +399,33 @@ If adapter presence must be checked at runtime, use sysfs path tracking instead 
 
 ## Known Issues
 
-### Flow Meter Disconnect Recovery ([#2](https://github.com/RotorSync/Big-Beautiful-Box/issues/2)) — FIXED
+### Flow Meter Disconnect Recovery ([#2](https://github.com/RotorSync/Big-Beautiful-Box/issues/2)) — REVISED 2026-09-05
+
+**Update (V2.50, 2026-09-05).** The 100 ms watchdog below turned out to be the dominant *cause*
+of field disconnects once (a) the master's stdout was routed through `src/log_filter.py`
+(2026-04-13), (b) the flow-control thread started polling at 50 Hz (2026-05-28), and (c) meter
+faults began pulsing the pump-stop relay (2026-05-28/29). The DEBUG master build printed ~350
+lines/s into that pipe with `fflush` per line under one stdout lock; any stall of the log
+consumer (SD card, logrotate, CPU) blocked the IO-Link cycle thread, the 100 ms watchdog fired,
+and a healthy link was torn down (`Cycle timeout in AW_REPLY - recovering` → COMLOST → dashboard
+`IOL DISCONNECT` → pump-stop pulse + 10 s hold). Reproduced on demand on trailersync-sn018 by
+freezing the log reader for 4 s; a real event (one late meter reply → retry → watchdog) was
+captured the same day. Changes:
+
+- `start_iol_dashboard.sh` now syncs the vendored `iol-hat` source into `~/iol-hat`, builds the
+  **release** binary (no `PINEDEBUG` per-cycle logging), prefers it, and **supervises** the
+  master (relaunch on exit). The in-app updater had never rebuilt the master before this.
+- Watchdog reworked (`iolink_dl.c`): 1000 ms (≈80 cycles) instead of 100 ms, and a stale-expiry
+  guard so a timer that raced a re-arm cannot tear down a link that just answered. Missing or
+  late device replies are still caught by the MAX14819 itself (`DelayErr`/`RxErr` → retry →
+  COMLOST) within one cycle; the watchdog only backstops a total interrupt loss.
+- `iolhat.py` `verbose = False` (was 4 print lines per read at 50 Hz).
+- Master TCP server: 2 s receive timeout on accepted sockets (a hung client can no longer wedge
+  every later dashboard request); status thread divide-by-zero fixed.
+
+Still open: the meter's L+ is hardwired to the shared 24 V rail on the trailers, so
+`iol_power_cycle()` cannot actually power-cycle the meter (it only flips the MAX14819 L+ switch).
+
 
 The Picomag flow meter would silently lose its IO-Link connection. The dashboard detected this via stale data (identical raw bytes for 5+ seconds) and triggered power-cycles, but the IOL master daemon could not recover without a full service restart.
 
