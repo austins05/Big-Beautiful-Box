@@ -527,11 +527,15 @@ int main (int argc, char ** argv)
 	iol_14819_0_cfg.chip_address   = 0,
 	
 	iol_14819_0_cfg.CQCfgA         = 0x02; //MAX14819_CQCFG_DRVDIS | MAX14819_CQCFG_SINKSEL(0x2),
-  iol_14819_0_cfg.LPCnfgA        = 0x00 | myBlankingTimeUInt8; //MAX14819_LPCNFG_LPEN,
+  // BBB 2026-09-05: enable the L+ sensor supply at init for ports configured as
+  // IO-Link. Previously L+ stayed OFF until a client sent CMD_PWR; after a
+  // supervisor relaunch nobody did, the MAX14819 then reported UVL+ (0 V on an
+  // open pin) and the dashboard held a "LOW VOLTAGE" pump-stop fault forever.
+  iol_14819_0_cfg.LPCnfgA        = ((mode_ch[0] == iolink_mode_SDCI) ? MAX14819_LPCNFG_LPEN : 0x00) | myBlankingTimeUInt8;
   iol_14819_0_cfg.IOStCfgA       = 0x25; //MAX14819_IOSTCFG_DICSINK | MAX14819_IOSTCFG_DIEC3TH,
 	
 	iol_14819_0_cfg.CQCfgB         = 0x02; //MAX14819_CQCFG_DRVDIS | MAX14819_CQCFG_SINKSEL(0x2),
-  iol_14819_0_cfg.LPCnfgB        = 0x00 | myBlankingTimeUInt8; //MAX14819_LPCNFG_LPEN,
+  iol_14819_0_cfg.LPCnfgB        = ((mode_ch[1] == iolink_mode_SDCI) ? MAX14819_LPCNFG_LPEN : 0x00) | myBlankingTimeUInt8;
   iol_14819_0_cfg.IOStCfgB       = 0x25; //MAX14819_IOSTCFG_DICSINK | MAX14819_IOSTCFG_DIEC3TH,	
 	
 	iol_14819_0_cfg.DrvCurrLim     = 0xC0;

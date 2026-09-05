@@ -5756,10 +5756,27 @@ def _log_iol_disconnect_status(reason):
     except Exception as e:
         print(f"IOL DISCONNECT [{reason}]: STATUS2 read failed: {e}", flush=True)
 
+_iol_port_power_restored_at = 0.0
+
+
 def _read_iol_status_ok():
     """Return whether IO-Link status indicates valid process data."""
+    global _iol_port_power_restored_at
     with iol_io_lock:
         st = iolhat.readStatus2(config.IOL_PORT)
+        # The IOL master leaves the port's L+ switch wherever it was; after the
+        # master is relaunched by its supervisor it comes up OFF, the MAX14819
+        # then reports UVL+ (0 V on the open pin) and this check would report
+        # "LOW VOLTAGE" forever while data is flowing. Turn L+ back on and
+        # re-read (rate-limited so a genuine 24 V fault is not hammered).
+        if getattr(st, "power", 1) != 1 and time.time() - _iol_port_power_restored_at > 5.0:
+            _iol_port_power_restored_at = time.time()
+            try:
+                iolhat.power(config.IOL_PORT, 1)
+                print("IOL port power was OFF (master restarted?) - switched L+ back on", flush=True)
+                st = iolhat.readStatus2(config.IOL_PORT)
+            except Exception as e:
+                print(f"IOL port power restore failed: {e}", flush=True)
     ok = st.pd_in_valid == 1 and st.transmission_rate != 0 and st.error == 0
     return ok, st
 
